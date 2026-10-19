@@ -1,0 +1,158 @@
+{% load static %}
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="csrf-token" content="{{ csrf_token }}">
+  <title>NEXUS — Ask your documents</title>
+  <link rel="stylesheet" href="{% static 'css/app.css' %}">
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="{% url 'home' %}" aria-label="DocuChat home">
+      <span class="brand-mark" aria-hidden="true">
+        <svg viewBox="0 0 32 32"><path d="M8 4.5h10l6 6v17H8z"/><path d="M18 4.5v6h6M12 16h8M12 20h8"/></svg>
+      </span>
+      <span>NEXUS.<span class="brand-light">Chat</span></span>
+    </a>
+    <div class="topbar-center"><span class="status-dot"></span> Your private document workspace</div>
+    <div class="topbar-actions">
+      <span class="model-status"><span class="model-pulse"></span> Local AI</span>
+      <button class="avatar" title="Workspace">G</button>
+    </div>
+  </header>
+
+  <div class="app-layout">
+    <aside class="panel sources-panel">
+      <div class="panel-heading">
+        <div>
+          <p class="eyebrow">WORKSPACE</p>
+          <h2>Sources <span class="source-total" id="source-total">{{ documents|length }}</span></h2>
+        </div>
+        <span class="panel-dots" aria-hidden="true">•••</span>
+      </div>
+      <button class="add-source-button" id="choose-files" type="button">
+        <span class="plus-icon">+</span> Add sources
+      </button>
+      <input id="file-input" type="file" accept=".pdf,.txt,.md,.docx" multiple hidden>
+      <div class="source-filter">
+        <span class="search-icon" aria-hidden="true">⌕</span>
+        <input id="source-search" type="search" placeholder="Find a source" aria-label="Find a source">
+        <kbd>⌘ K</kbd>
+      </div>
+      <div class="source-list-heading">
+        <span>YOUR DOCUMENTS</span>
+        <label class="select-all"><input type="checkbox" id="select-all" checked> Select all</label>
+      </div>
+      <div class="document-list" id="document-list">
+        {% for document in documents %}
+        <label class="document-item" data-name="{{ document.name|lower }}">
+          <input class="document-check" type="checkbox" value="{{ document.id }}" checked>
+          <span class="file-icon {% if document.name|lower|slice:'-4:' == '.pdf' %}pdf-icon{% endif %}" aria-hidden="true">
+            <svg viewBox="0 0 24 24"><path d="M6 2.75h8l4.5 4.5v14H6z"/><path d="M14 2.75v5h4.5M9 12h6M9 15h6M9 18h4"/></svg>
+          </span>
+          <span class="document-name" title="{{ document.name }}">{{ document.name }}</span>
+          <span class="check-indicator" aria-hidden="true">✓</span>
+        </label>
+        {% empty %}
+        <div class="empty-sources" id="empty-sources">
+          <span class="empty-file-icon" aria-hidden="true">▤</span>
+          <strong>No sources yet</strong>
+          <span>Add a document to start asking questions.</span>
+        </div>
+        {% endfor %}
+      </div>
+      <div class="sources-footer">
+        <div class="privacy-lock" aria-hidden="true">⌑</div>
+        <div><strong>Your sources stay yours</strong><span>Documents are stored locally.</span></div>
+      </div>
+    </aside>
+
+    <main class="conversation-panel">
+      <div class="conversation-topline">
+        <div class="crumb"><span class="crumb-icon">▤</span><span>My notebook</span><span class="crumb-separator">/</span><span class="crumb-active">New conversation</span></div>
+        <button class="icon-button" id="clear-chat" type="button" title="Clear saved conversation" aria-label="Clear saved conversation">↻</button>
+      </div>
+
+      <section class="welcome" id="welcome" {% if chat_messages %}hidden{% endif %}>
+        <div class="welcome-icon">
+          <svg viewBox="0 0 48 48" aria-hidden="true"><path d="M13 7h15l8 8v26H13z"/><path d="M28 7v9h8M19 24h11M19 29h11M19 34h7"/></svg>
+          <span class="sparkle">✦</span>
+        </div>
+        <p class="eyebrow welcome-eyebrow">YOUR PERSONAL RESEARCH SPACE</p>
+        <h1>Understand your<br><span>documents, faster.</span></h1>
+        <p class="welcome-copy">Add your sources, then ask anything. Your answers are grounded in the documents you choose.</p>
+        <div class="suggestion-label">A FEW IDEAS TO GET STARTED</div>
+        <div class="suggestion-grid">
+          <button class="suggestion-card" type="button" data-question="Give me a concise summary of these documents.">
+            <span class="suggestion-icon violet">✧</span><span>Summarize the key ideas</span><span class="suggestion-arrow">↗</span>
+          </button>
+          <button class="suggestion-card" type="button" data-question="What are the most important facts and figures in these documents?">
+            <span class="suggestion-icon blue">▤</span><span>Find important facts</span><span class="suggestion-arrow">↗</span>
+          </button>
+          <button class="suggestion-card" type="button" data-question="What are the main differences or connections between these documents?">
+            <span class="suggestion-icon amber">⌘</span><span>Compare my sources</span><span class="suggestion-arrow">↗</span>
+          </button>
+        </div>
+      </section>
+
+      <section class="chat-history" id="chat-history" aria-live="polite" aria-label="Conversation">
+        {% for message in chat_messages %}
+        <article class="message message-{{ message.role }}">
+          <div class="message-avatar">{% if message.role == "user" %}G{% else %}✦{% endif %}</div>
+          <div class="message-body">
+            <div class="message-author">{% if message.role == "user" %}You{% else %}DocuChat{% endif %}</div>
+            <div class="message-text">{{ message.content|linebreaksbr }}</div>
+            {% if message.sources %}
+            <div class="message-sources">{% for source in message.sources %}<span class="source-chip">▤ {{ source }}</span>{% endfor %}</div>
+            {% endif %}
+          </div>
+        </article>
+        {% endfor %}
+      </section>
+
+      <div class="composer-area">
+        <form id="chat-form" class="composer">
+          {% csrf_token %}
+          <textarea id="question-input" rows="1" placeholder="Ask a question about your sources..." aria-label="Your question" maxlength="2000"></textarea>
+          <div class="composer-bottom">
+            <div class="composer-hint"><span class="hint-source">▤</span><span id="selected-count">{{ documents|length }} sources selected</span><span class="hint-divider">·</span><span>Answers grounded in your sources</span></div>
+            <button class="send-button" id="send-button" type="submit" aria-label="Send question">
+              <span>Ask</span><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M4 10h11M10 5l5 5-5 5"/></svg>
+            </button>
+          </div>
+        </form>
+        <p class="disclaimer"><span>✦</span> AI can make mistakes. Check important details in your sources.</p>
+      </div>
+    </main>
+
+    <aside class="panel studio-panel">
+      <div class="panel-heading studio-heading">
+        <div><p class="eyebrow">YOUR WORKSPACE</p><h2>Studio <span class="studio-spark">✦</span></h2></div>
+        <button class="icon-button subtle-icon" type="button" aria-label="Studio options">•••</button>
+      </div>
+      <div class="studio-note">
+        <span class="note-icon">✦</span>
+        <div><strong>Make the most of your sources</strong><p>Ask questions in the chat or try one of these prompts.</p></div>
+      </div>
+      <div class="studio-section-label">EXPLORE YOUR SOURCES</div>
+      <div class="studio-tools">
+        <button type="button" class="studio-tool" data-question="Summarize the key takeaways from my selected documents."><span class="tool-icon teal">≋</span><span>Key takeaways</span><span class="tool-arrow">↗</span></button>
+        <button type="button" class="studio-tool" data-question="Create a short study guide based on my selected documents."><span class="tool-icon purple">▣</span><span>Study guide</span><span class="tool-arrow">↗</span></button>
+        <button type="button" class="studio-tool" data-question="List the key terms in my selected documents and explain each one."><span class="tool-icon orange">⌕</span><span>Key terms</span><span class="tool-arrow">↗</span></button>
+        <button type="button" class="studio-tool" data-question="What questions should I ask to better understand these documents?"><span class="tool-icon blue">☷</span><span>Explore questions</span><span class="tool-arrow">↗</span></button>
+      </div>
+      <div class="studio-empty">
+        <span class="studio-empty-star">✧</span>
+        <strong>Your ideas start here</strong>
+        <p>Select a prompt above or ask a question to explore your documents.</p>
+      </div>
+      <div class="studio-footer"><span class="footer-spark">✦</span><span>Powered by your documents</span></div>
+    </aside>
+  </div>
+
+  <div class="toast" id="toast" role="status" aria-live="polite"></div>
+  <script src="{% static 'js/app.js' %}" defer></script>
+</body>
+</html>
