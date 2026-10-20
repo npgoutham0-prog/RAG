@@ -1,10 +1,14 @@
 """Document parsing, retrieval, and answer generation."""
 
+import asyncio
+import ipaddress
 import io
 import os
 import re
+import socket
 import zipfile
 from xml.etree import ElementTree
+from urllib.parse import urlsplit
 
 import httpx
 from django.core.exceptions import ValidationError
@@ -20,10 +24,213 @@ SUPPORTED_EXTENSIONS = {".pdf", ".txt", ".md", ".docx"}
 MAX_UPLOAD_SIZE = 20 * 1024 * 1024
 CHUNK_SIZE = 1200
 CHUNK_OVERLAP = 180
+MAX_CRAWL_URL_LENGTH = 2048
+MAX_CRAWLED_TEXT_LENGTH = 1_000_000
+NEXUS_CREATOR_ANSWER = "The NEXUS AI was built by ADARSH & GOUTHAM."
+NEXUS_OVERVIEW_ANSWER = (
+    "## What is Nexus AI?\n"
+    "Nexus AI is an AI-powered intelligent chatbot developed by Adarsh and "
+    "Goutham to make information easier to access, understand, and explore. "
+    "It is designed to interact with users through natural language, answer "
+    "questions, retrieve relevant information from documents, and generate "
+    "meaningful responses using Artificial Intelligence (AI).\n\n"
+    "Nexus AI uses Retrieval-Augmented Generation (RAG) to combine "
+    "document-based information retrieval with AI-generated answers. This "
+    "enables users to ask questions about their uploaded documents and "
+    "receive relevant, context-aware responses. By integrating a language "
+    "model with a document retrieval system, Nexus AI aims to provide a "
+    "smarter and more useful information assistant.\n\n"
+    "## Key features\n"
+    "- AI-powered conversations: Interacts with users and responds to "
+    "questions in natural language.\n"
+    "- Document-based question answering: Retrieves relevant information "
+    "from uploaded documents using RAG.\n"
+    "- Intelligent information retrieval: Finds useful content related to "
+    "the user's query.\n"
+    "- Modern user interface: Provides a clean, interactive, and user-friendly "
+    "chatting experience.\n"
+    "- Local AI integration: Can use Ollama to run supported language models "
+    "locally.\n"
+    "- Flexible and extensible design: Can be expanded with additional AI "
+    "capabilities and features.\n\n"
+    "## Technologies used\n"
+    "- Python — Core programming and AI logic.\n"
+    "- Django — Backend development and request handling.\n"
+    "- HTML, CSS and JavaScript — Interactive frontend and user experience.\n"
+    "- Ollama — Local language model execution.\n"
+    "- RAG — Document retrieval and context-aware response generation.\n"
+    "- Embeddings and vector search — Finding relevant information within "
+    "documents.\n\n"
+    "## Project vision\n"
+    "Our vision is to build an intelligent, accessible, and efficient AI "
+    "assistant that connects users with the information they need. Nexus AI "
+    "aims to bring together conversational AI and document intelligence in "
+    "one platform.\n\n"
+    "Developed by Adarsh & Goutham."
+)
+NEXUS_RAG_ANSWER = (
+    "Nexus AI uses Retrieval-Augmented Generation (RAG): it searches selected "
+    "documents for relevant passages, then provides those passages to a "
+    "language model so it can generate a context-aware answer grounded in "
+    "the documents."
+)
+NEXUS_FEATURES_ANSWER = (
+    "Nexus AI features natural-language conversations, document-based "
+    "question answering with RAG, intelligent information retrieval, a "
+    "modern interactive interface, local language-model integration through "
+    "Ollama, and an extensible design for additional AI capabilities."
+)
+NEXUS_TECHNOLOGIES_ANSWER = (
+    "Nexus AI uses Python for its core logic, Django for its backend, HTML, "
+    "CSS, and JavaScript for its interface, Ollama for local language-model "
+    "execution, and Retrieval-Augmented Generation (RAG) with embeddings "
+    "and vector search for document retrieval."
+)
+NEXUS_VISION_ANSWER = (
+    "The vision for Nexus AI is to build an intelligent, accessible, and "
+    "efficient assistant that connects people with the information they "
+    "need by bringing conversational AI and document intelligence together."
+)
+GREETING_ANSWER = "Hello what can i do for you ?"
+THANK_YOU_ANSWER = "Happy to help. Take care! 👋"
 
 
 class NoRelevantContentError(Exception):
     """Raised when selected documents contain no text matching the question."""
+
+
+class WebCrawlError(Exception):
+    """Raised when Crawl4AI cannot extract readable page content."""
+
+
+def is_greeting(question):
+    """Return whether the message is a simple hi or hello greeting."""
+    normalized = re.sub(r"[^\w\s]", "", question.lower()).strip()
+    return normalized in {"hi", "hello"}
+
+
+def is_thank_you(question):
+    """Return whether the message is a simple expression of thanks."""
+    normalized = re.sub(r"[^\w\s]", "", question.lower())
+    normalized = re.sub(r"\s+", " ", normalized).strip()
+    return normalized in {"thank you", "thanks", "thank you so much", "thanks so much"}
+
+
+def nexus_project_answer(question):
+    """Return built-in Nexus project information for recognized questions."""
+    normalized = re.sub(r"\s+", " ", question.lower()).strip()
+    if not re.search(r"\bnexus\b", normalized):
+        return None
+
+    if re.search(
+        r"\b(build|built|builder|builders|create|created|creator|creators|"
+        r"develop|developed|developer|developers|founder|founders|founded|made)\b",
+        normalized,
+    ):
+        return NEXUS_CREATOR_ANSWER
+    if re.search(r"\b(feature|features|capability|capabilities)\b", normalized):
+        return NEXUS_FEATURES_ANSWER
+    if re.search(r"\b(technology|technologies|tech stack|framework|language)\b", normalized):
+        return NEXUS_TECHNOLOGIES_ANSWER
+    if re.search(r"\b(vision|goal|goals|purpose)\b", normalized):
+        return NEXUS_VISION_ANSWER
+    if re.search(r"\b(rag|retrieval|how does .* work|how .* work)\b", normalized):
+        return NEXUS_RAG_ANSWER
+    if re.search(r"\b(what is|what's|who is|tell me about|describe|about)\b", normalized):
+        return NEXUS_OVERVIEW_ANSWER
+    return None
+
+
+def is_nexus_knowledge_question(question):
+    """Return whether a question can be answered from built-in Nexus facts."""
+    return nexus_project_answer(question) is not None
+
+
+def is_builtin_question(question):
+    """Return whether a question can be answered without document sources."""
+    return (
+        is_greeting(question)
+        or is_thank_you(question)
+        or is_nexus_knowledge_question(question)
+    )
+
+
+def validate_public_url(url):
+    """Validate an HTTP(S) URL and reject hosts that resolve to non-public IPs."""
+    if len(url) > MAX_CRAWL_URL_LENGTH:
+        raise ValidationError("URLs must be 2,048 characters or fewer.")
+
+    try:
+        parsed = urlsplit(url)
+        hostname = parsed.hostname
+        port = parsed.port
+    except ValueError as exc:
+        raise ValidationError("Enter a valid public HTTP or HTTPS URL.") from exc
+
+    if (
+        parsed.scheme not in {"http", "https"}
+        or not hostname
+        or parsed.username is not None
+        or parsed.password is not None
+        or port is not None and not 1 <= port <= 65535
+    ):
+        raise ValidationError("Enter a valid public HTTP or HTTPS URL.")
+
+    try:
+        addresses = {ipaddress.ip_address(hostname)}
+    except ValueError:
+        if hostname.lower() == "localhost" or hostname.lower().endswith(".localhost"):
+            raise ValidationError("Only publicly accessible websites can be crawled.")
+        try:
+            addresses = {
+                ipaddress.ip_address(address[4][0])
+                for address in socket.getaddrinfo(hostname, port or (443 if parsed.scheme == "https" else 80))
+            }
+        except (OSError, ValueError) as exc:
+            raise ValidationError("The website hostname could not be resolved.") from exc
+
+    if not addresses or any(not address.is_global for address in addresses):
+        raise ValidationError("Only publicly accessible websites can be crawled.")
+    return url
+
+
+async def _crawl_with_crawl4ai(url):
+    try:
+        from crawl4ai import AsyncWebCrawler, BrowserConfig, CacheMode, CrawlerRunConfig
+        from playwright.async_api import Error as PlaywrightError
+    except ImportError as exc:
+        raise RuntimeError(
+            "Crawl4AI is not installed. Install the project requirements and run "
+            "'crawl4ai-setup' to install its browser."
+        ) from exc
+
+    browser_config = BrowserConfig(headless=True, verbose=False)
+    run_config = CrawlerRunConfig(cache_mode=CacheMode.BYPASS, page_timeout=45_000)
+    try:
+        async with AsyncWebCrawler(config=browser_config) as crawler:
+            return await crawler.arun(url=url, config=run_config)
+    except PlaywrightError as exc:
+        raise RuntimeError(
+            "Crawl4AI could not start its browser. Run 'crawl4ai-setup' and try again."
+        ) from exc
+
+
+def crawl_url(url):
+    """Crawl one public web page and return its final URL and extracted text."""
+    validated_url = validate_public_url(url)
+    result = asyncio.run(_crawl_with_crawl4ai(validated_url))
+    if not result.success:
+        raise WebCrawlError(result.error_message or "Crawl4AI could not read this page.")
+
+    final_url = validate_public_url(result.url or validated_url)
+    markdown = result.markdown
+    text = getattr(markdown, "raw_markdown", markdown)
+    text = str(text or "").strip()
+    if not text:
+        raise WebCrawlError("No readable page content was found at this URL.")
+    if len(text) > MAX_CRAWLED_TEXT_LENGTH:
+        raise WebCrawlError("The page contains too much text to add as a source.")
+    return {"url": final_url, "text": text}
 
 
 def read_document(upload):
@@ -100,26 +307,49 @@ def retrieve_relevant_chunks(question, documents, limit=4):
     if not candidates:
         return []
 
-    vectorizer = TfidfVectorizer(stop_words="english")
+    texts = [item[0] for item in candidates]
     try:
-        matrix = vectorizer.fit_transform([question] + [item[0] for item in candidates])
-        scores = cosine_similarity(matrix[0:1], matrix[1:]).ravel()
+        word_vectorizer = TfidfVectorizer(stop_words="english")
+        word_matrix = word_vectorizer.fit_transform([question] + texts)
+        word_scores = cosine_similarity(word_matrix[0:1], word_matrix[1:]).ravel()
+
+        char_vectorizer = TfidfVectorizer(
+            analyzer="char_wb",
+            ngram_range=(3, 5),
+            max_features=100_000,
+        )
+        char_matrix = char_vectorizer.fit_transform([question] + texts)
+        char_scores = cosine_similarity(char_matrix[0:1], char_matrix[1:]).ravel()
     except ValueError:
         return []
+
+    scores = word_scores + char_scores
     ranked = sorted(
-        zip(scores, candidates),
+        zip(scores, word_scores, char_scores, candidates),
         key=lambda item: item[0],
         reverse=True,
     )
     return [
         {"text": chunk, "name": name, "chunk": chunk_number, "score": float(score)}
-        for score, (chunk, name, chunk_number) in ranked[:limit]
-        if score > 0
-    ]
+        for score, word_score, char_score, (chunk, name, chunk_number) in ranked
+        if word_score > 0 or char_score >= 0.08
+    ][:limit]
 
 
 def answer_question(question, documents):
     """Answer using retrieved evidence, returning the answer and source labels."""
+    if is_greeting(question):
+        return {"answer": GREETING_ANSWER, "sources": []}
+    if is_thank_you(question):
+        return {"answer": THANK_YOU_ANSWER, "sources": []}
+
+    project_answer = nexus_project_answer(question)
+    if project_answer:
+        return {
+            "answer": project_answer,
+            "sources": ["NEXUS project information"],
+        }
+
     matches = retrieve_relevant_chunks(question, documents)
     if not matches:
         raise NoRelevantContentError(

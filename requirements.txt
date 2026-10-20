@@ -10,3 +10,4 @@ tiktoken
 Django>=5.2,<6.0
 pypdf>=5.0
 httpx>=0.27,<1.0
+crawl4ai>=0.4.247,<1.0

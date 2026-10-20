@@ -1,16 +1,18 @@
-# DocuChat
+# NEXUS
 
-DocuChat is a local Django app for uploading documents and asking questions grounded in their contents. The interface is inspired by the attached notebook-style reference: a source library, central chat, and a compact workspace panel.
+NEXUS is a local Django app for uploading documents and asking questions grounded in their contents. The interface is inspired by the attached notebook-style reference: a source library, central chat, and a compact workspace panel.
 
 ## Supported documents
 
 PDF, DOCX, Markdown, and plain-text (`.txt`) files are supported. Uploads are limited to 20 MB each. Scanned PDFs without an embedded text layer are not OCR-processed.
+You can also add a public HTTP(S) page by URL. NEXUS uses Crawl4AI to extract the page text and adds it to the source list so it can be selected for questions alongside uploaded documents.
 
 ## Setup
 
 ```powershell
 .\.venv\Scripts\Activate.ps1
 pip install -r requirements.txt
+crawl4ai-setup
 python manage.py migrate
 python manage.py runserver
 ```

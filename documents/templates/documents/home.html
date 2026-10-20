@@ -5,21 +5,24 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="csrf-token" content="{{ csrf_token }}">
-  <title>NEXUS — Ask your documents</title>
-  <link rel="stylesheet" href="{% static 'css/app.css' %}">
+  <title>NEXUS AI</title>
+  <link rel="stylesheet" href="{% static 'css/app.css' %}?v=3">
 </head>
 <body>
   <header class="topbar">
-    <a class="brand" href="{% url 'home' %}" aria-label="DocuChat home">
+    <a class="brand" href="{% url 'home' %}" aria-label="NEXUS AI home">
       <span class="brand-mark" aria-hidden="true">
         <svg viewBox="0 0 32 32"><path d="M8 4.5h10l6 6v17H8z"/><path d="M18 4.5v6h6M12 16h8M12 20h8"/></svg>
       </span>
-      <span>NEXUS.<span class="brand-light">Chat</span></span>
+      <span>NEXUS.<span class="brand-light">AI Work space</span></span>
     </a>
-    <div class="topbar-center"><span class="status-dot"></span> Your private document workspace</div>
+    <div class="topbar-center">
+      <span>Your private document workspace</span>
+      <span class="topbar-dots" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i><i></i></span>
+    </div>
     <div class="topbar-actions">
-      <span class="model-status"><span class="model-pulse"></span> Local AI</span>
-      <button class="avatar" title="Workspace">G</button>
+      <span class="model-status"><span class="model-pulse"></span>RAG AI</span>
+      <button class="avatar" title="Workspace">N</button>
     </div>
   </header>
 
@@ -28,7 +31,7 @@
       <div class="panel-heading">
         <div>
           <p class="eyebrow">WORKSPACE</p>
-          <h2>Sources <span class="source-total" id="source-total">{{ documents|length }}</span></h2>
+          <h2>NEXUS<span class="source-total" id="source-total">{{ documents|length }}</span></h2>
         </div>
         <span class="panel-dots" aria-hidden="true">•••</span>
       </div>
@@ -36,25 +39,35 @@
         <span class="plus-icon">+</span> Add sources
       </button>
       <input id="file-input" type="file" accept=".pdf,.txt,.md,.docx" multiple hidden>
+      <form id="crawl-form" class="crawl-form">
+        <label for="crawl-url">Crawl a website</label>
+        <div class="crawl-controls">
+          <input id="crawl-url" type="url" placeholder="https://example.com" maxlength="2048" required>
+          <button id="crawl-button" type="submit">Crawl URL</button>
+        </div>
+      </form>
       <div class="source-filter">
         <span class="search-icon" aria-hidden="true">⌕</span>
         <input id="source-search" type="search" placeholder="Find a source" aria-label="Find a source">
         <kbd>⌘ K</kbd>
       </div>
       <div class="source-list-heading">
-        <span>YOUR DOCUMENTS</span>
+        <span>Your Sources</span>
         <label class="select-all"><input type="checkbox" id="select-all" checked> Select all</label>
       </div>
       <div class="document-list" id="document-list">
         {% for document in documents %}
-        <label class="document-item" data-name="{{ document.name|lower }}">
-          <input class="document-check" type="checkbox" value="{{ document.id }}" checked>
-          <span class="file-icon {% if document.name|lower|slice:'-4:' == '.pdf' %}pdf-icon{% endif %}" aria-hidden="true">
-            <svg viewBox="0 0 24 24"><path d="M6 2.75h8l4.5 4.5v14H6z"/><path d="M14 2.75v5h4.5M9 12h6M9 15h6M9 18h4"/></svg>
-          </span>
-          <span class="document-name" title="{{ document.name }}">{{ document.name }}</span>
-          <span class="check-indicator" aria-hidden="true">✓</span>
-        </label>
+        <div class="document-item" data-name="{{ document.name|lower }}">
+          <label class="document-choice">
+            <input class="document-check" type="checkbox" value="{{ document.id }}" checked>
+            <span class="file-icon {% if document.name|lower|slice:'-4:' == '.pdf' %}pdf-icon{% endif %}" aria-hidden="true">
+              <svg viewBox="0 0 24 24"><path d="M6 2.75h8l4.5 4.5v14H6z"/><path d="M14 2.75v5h4.5M9 12h6M9 15h6M9 18h4"/></svg>
+            </span>
+            <span class="document-name" title="{{ document.name }}">{{ document.name }}</span>
+            <span class="check-indicator" aria-hidden="true">✓</span>
+          </label>
+          <button class="delete-document" type="button" aria-label="Delete {{ document.name }}" title="Delete source">×</button>
+        </div>
         {% empty %}
         <div class="empty-sources" id="empty-sources">
           <span class="empty-file-icon" aria-hidden="true">▤</span>
@@ -89,7 +102,7 @@
             <span class="suggestion-icon violet">✧</span><span>Summarize the key ideas</span><span class="suggestion-arrow">↗</span>
           </button>
           <button class="suggestion-card" type="button" data-question="What are the most important facts and figures in these documents?">
-            <span class="suggestion-icon blue">▤</span><span>Find important facts</span><span class="suggestion-arrow">↗</span>
+            <span class="suggestion-icon blue">▤</span><span>Find important keys</span><span class="suggestion-arrow">↗</span>
           </button>
           <button class="suggestion-card" type="button" data-question="What are the main differences or connections between these documents?">
             <span class="suggestion-icon amber">⌘</span><span>Compare my sources</span><span class="suggestion-arrow">↗</span>
@@ -100,15 +113,14 @@
       <section class="chat-history" id="chat-history" aria-live="polite" aria-label="Conversation">
         {% for message in chat_messages %}
         <article class="message message-{{ message.role }}">
-          <div class="message-avatar">{% if message.role == "user" %}G{% else %}✦{% endif %}</div>
+          <div class="message-avatar">{% if message.role == "user" %}⌬{% else %}✦{% endif %}</div>
           <div class="message-body">
-            <div class="message-author">{% if message.role == "user" %}You{% else %}DocuChat{% endif %}</div>
+            <div class="message-author">{% if message.role == "user" %}You{% else %}NEXUS{% endif %}</div>
             <div class="message-text">{{ message.content|linebreaksbr }}</div>
             {% if message.sources %}
-            <div class="message-sources">{% for source in message.sources %}<span class="source-chip">▤ {{ source }}</span>{% endfor %}</div>
+       <div class="message-sources">{% for source in message.sources %}<span class="source-chip">▤ {{ source }}</span>{% endfor %}</div>
             {% endif %}
-          </div>
-        </article>
+         </article>
         {% endfor %}
       </section>
 
@@ -118,9 +130,12 @@
           <textarea id="question-input" rows="1" placeholder="Ask a question about your sources..." aria-label="Your question" maxlength="2000"></textarea>
           <div class="composer-bottom">
             <div class="composer-hint"><span class="hint-source">▤</span><span id="selected-count">{{ documents|length }} sources selected</span><span class="hint-divider">·</span><span>Answers grounded in your sources</span></div>
-            <button class="send-button" id="send-button" type="submit" aria-label="Send question">
-              <span>Ask</span><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M4 10h11M10 5l5 5-5 5"/></svg>
-            </button>
+            <span class="send-button-anchor">
+              <button class="send-button" id="send-button" type="submit" aria-label="Send question">
+                <svg class="send-plane" viewBox="0 0 24 24" aria-hidden="true"><path d="M22 2 2 11l8 3 3 8L22 2Z"/><path class="plane-fold" d="m10 14 12-12"/></svg>
+                <span>Ask</span><svg class="send-arrow" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 12h15m-6-6 6 6-6 6"/></svg>
+              </button>
+            </span>
           </div>
         </form>
         <p class="disclaimer"><span>✦</span> AI can make mistakes. Check important details in your sources.</p>
@@ -148,11 +163,12 @@
         <strong>Your ideas start here</strong>
         <p>Select a prompt above or ask a question to explore your documents.</p>
       </div>
-      <div class="studio-footer"><span class="footer-spark">✦</span><span>Powered by your documents</span></div>
+      <div class="studio-footer"><span class="footer-spark">✦</span><span>Powered by NEXUS</span></div><br>
+      <div class="studio-footer"><span class="footer-spark">✦</span><span>Made by ADARSH & GOUTHAM</span></div>
     </aside>
   </div>
 
   <div class="toast" id="toast" role="status" aria-live="polite"></div>
-  <script src="{% static 'js/app.js' %}" defer></script>
+  <script src="{% static 'js/app.js' %}?v=7" defer></script>
 </body>
 </html>

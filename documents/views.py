@@ -1,5 +1,6 @@
 import json
 import zipfile
+from urllib.parse import urlsplit
 
 from django.core.exceptions import ValidationError
 from django.http import JsonResponse
@@ -7,7 +8,14 @@ from django.shortcuts import render
 from django.views.decorators.http import require_GET, require_POST
 
 from .models import ChatMessage, UploadedDocument
-from .services import NoRelevantContentError, answer_question, read_document
+from .services import (
+    NoRelevantContentError,
+    WebCrawlError,
+    answer_question,
+    crawl_url,
+    is_builtin_question,
+    read_document,
+)
 
 
 def home(request):
@@ -35,6 +43,17 @@ def document_list(_request):
             ]
         }
     )
+
+
+@require_POST
+def delete_document(_request, document_id):
+    document = UploadedDocument.objects.filter(id=document_id).first()
+    if document is None:
+        return JsonResponse({"error": "Source not found."}, status=404)
+    if document.file:
+        document.file.delete(save=False)
+    document.delete()
+    return JsonResponse({"deleted": True})
 
 
 @require_POST
@@ -69,6 +88,38 @@ def upload_documents(request):
 
 
 @require_POST
+def crawl_document(request):
+    try:
+        payload = json.loads(request.body)
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return JsonResponse({"error": "Send a valid JSON request."}, status=400)
+
+    if not isinstance(payload, dict):
+        return JsonResponse({"error": "Send a JSON object with a URL."}, status=400)
+    url = payload.get("url", "")
+    if not isinstance(url, str) or not url.strip():
+        return JsonResponse({"error": "Enter a URL to crawl."}, status=400)
+
+    try:
+        result = crawl_url(url.strip())
+    except ValidationError as exc:
+        return JsonResponse({"error": " ".join(exc.messages)}, status=400)
+    except WebCrawlError as exc:
+        return JsonResponse({"error": str(exc)}, status=422)
+    except RuntimeError as exc:
+        return JsonResponse({"error": str(exc)}, status=503)
+
+    parsed_url = urlsplit(result["url"])
+    name = f"{parsed_url.netloc}{parsed_url.path}".rstrip("/") or parsed_url.netloc
+    document = UploadedDocument.objects.create(
+        name=name[:255],
+        source_url=result["url"],
+        extracted_text=result["text"],
+    )
+    return JsonResponse({"id": document.id, "name": document.name}, status=201)
+
+
+@require_POST
 def chat(request):
     try:
         payload = json.loads(request.body)
@@ -86,7 +137,9 @@ def chat(request):
         return JsonResponse({"error": "Enter a question first."}, status=400)
     if len(question) > 2000:
         return JsonResponse({"error": "Questions must be 2,000 characters or fewer."}, status=400)
-    if not isinstance(document_ids, list) or not document_ids:
+    if not isinstance(document_ids, list):
+        return JsonResponse({"error": "Select at least one document."}, status=400)
+    if not document_ids and not is_builtin_question(question):
         return JsonResponse({"error": "Select at least one document."}, status=400)
     try:
         ids = [int(document_id) for document_id in document_ids]
