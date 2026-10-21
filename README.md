@@ -58,6 +58,19 @@ Uploaded files are sent directly from the browser to Supabase Storage, avoiding 
 
 **Access warning:** This starter app has no user authentication or per-user data isolation. Anyone who can access the deployed URL can see, add, or delete documents and chat messages. Do not use it for private or sensitive documents until authentication and access controls are added.
 
+## Deploy with Netlify and Render
+
+Netlify does not run this Django application directly. Use Render for the Django server and Netlify as the public URL, proxying requests to the Render service.
+
+1. Connect this repository and the `feature` branch to Render using the root `render.yaml` Blueprint. The Blueprint creates a **free** web service and prompts you for the database, Supabase Storage, Ollama, allowed-host, and CSRF-origin variables. Use the Supabase PostgreSQL and private S3-compatible bucket described above; do not use local SQLite or local file storage for deployed data.
+2. Wait for the Render service to deploy. Copy its public `https://<service>.onrender.com` URL.
+3. In the Netlify-connected repository, add a `netlify.toml` proxy rewrite for `/*` to `https://<service>.onrender.com/:splat` with status `200` and `force = true`. Replace `<service>` with the actual Render hostname, then deploy the `feature` branch on Netlify. The Netlify site URL must be included in Render's `DJANGO_ALLOWED_HOSTS` and `DJANGO_CSRF_TRUSTED_ORIGINS` values.
+4. Add the Netlify proxy URL to the Supabase Storage CORS allowed origins for browser `PUT` requests with the `Content-Type` header.
+
+The free Render service sleeps after 15 minutes without traffic and can take about a minute to wake. Netlify's proxy requests time out after 26 seconds, so a request that wakes a sleeping service may time out; retry after the service has started. Long-running model responses can also exceed the proxy timeout. For production use, select an always-on backend plan and keep model response times within Netlify's proxy limit.
+
+Keep all credentials in the Render environment settings, not in this repository. The same access warning above applies: this app has no authentication or per-user data isolation.
+
 ## Tests
 
 ```powershell

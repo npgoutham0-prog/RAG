@@ -10,7 +10,8 @@ from django.core.exceptions import ImproperlyConfigured
 BASE_DIR = Path(__file__).resolve().parent.parent
 
 DEBUG = os.environ.get(
-    "DJANGO_DEBUG", "false" if os.environ.get("VERCEL") else "true"
+    "DJANGO_DEBUG",
+    "false" if os.environ.get("VERCEL") or os.environ.get("RENDER") else "true",
 ).lower() == "true"
 SECRET_KEY = os.environ.get("DJANGO_SECRET_KEY") or (
     "django-insecure-local-docuchat-key" if DEBUG else ""
@@ -25,16 +26,17 @@ ALLOWED_HOSTS = [
     ).split(",")
     if host.strip()
 ]
-VERCEL_HOSTS = [
+DEPLOYMENT_HOSTS = [
     os.environ[name].strip()
     for name in (
         "VERCEL_URL",
         "VERCEL_BRANCH_URL",
         "VERCEL_PROJECT_PRODUCTION_URL",
+        "RENDER_EXTERNAL_HOSTNAME",
     )
     if os.environ.get(name, "").strip()
 ]
-ALLOWED_HOSTS.extend(host for host in VERCEL_HOSTS if host not in ALLOWED_HOSTS)
+ALLOWED_HOSTS.extend(host for host in DEPLOYMENT_HOSTS if host not in ALLOWED_HOSTS)
 CSRF_TRUSTED_ORIGINS = [
     origin.strip()
     for origin in os.environ.get("DJANGO_CSRF_TRUSTED_ORIGINS", "").split(",")
@@ -42,7 +44,7 @@ CSRF_TRUSTED_ORIGINS = [
 ]
 CSRF_TRUSTED_ORIGINS.extend(
     origin
-    for origin in (f"https://{host}" for host in VERCEL_HOSTS)
+    for origin in (f"https://{host}" for host in DEPLOYMENT_HOSTS)
     if origin not in CSRF_TRUSTED_ORIGINS
 )
 SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
@@ -73,6 +75,7 @@ INSTALLED_APPS = [
 
 MIDDLEWARE = [
     "django.middleware.security.SecurityMiddleware",
+    "whitenoise.middleware.WhiteNoiseMiddleware",
     "django.contrib.sessions.middleware.SessionMiddleware",
     "django.middleware.common.CommonMiddleware",
     "django.middleware.csrf.CsrfViewMiddleware",
@@ -131,7 +134,13 @@ SUPABASE_STORAGE_ENV = {
 DIRECT_UPLOADS_ENABLED = all(SUPABASE_STORAGE_ENV.values())
 STORAGES = {
     "default": {"BACKEND": "django.core.files.storage.FileSystemStorage"},
-    "staticfiles": {"BACKEND": "django.contrib.staticfiles.storage.StaticFilesStorage"},
+    "staticfiles": {
+        "BACKEND": (
+            "whitenoise.storage.CompressedManifestStaticFilesStorage"
+            if not DEBUG
+            else "django.contrib.staticfiles.storage.StaticFilesStorage"
+        )
+    },
 }
 if DIRECT_UPLOADS_ENABLED:
     STORAGES["default"] = {
