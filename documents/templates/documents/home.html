@@ -38,7 +38,7 @@
       <button class="add-source-button" id="choose-files" type="button">
         <span class="plus-icon">+</span> Add sources
       </button>
-      <input id="file-input" type="file" accept=".pdf,.txt,.md,.docx" multiple hidden>
+      <input id="file-input" type="file" accept=".pdf,.txt,.md,.docx" data-direct-upload="{{ direct_uploads|yesno:'true,false' }}" multiple hidden>
       <form id="crawl-form" class="crawl-form">
         <label for="crawl-url">Crawl a website</label>
         <div class="crawl-controls">

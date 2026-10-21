@@ -119,24 +119,72 @@
   }
 
   chooseFiles.addEventListener("click", () => fileInput.click());
+  async function uploadDirectFile(file) {
+    const signedResponse = await fetch("/api/upload/presign/", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-CSRFToken": csrfToken },
+      body: JSON.stringify({ name: file.name, size: file.size }),
+    });
+    const signedUpload = await signedResponse.json();
+    if (!signedResponse.ok) throw new Error(signedUpload.error || "Could not prepare the upload.");
+
+    let storageResponse;
+    try {
+      storageResponse = await fetch(signedUpload.upload_url, {
+        method: "PUT",
+        headers: { "Content-Type": signedUpload.content_type },
+        body: file,
+      });
+    } catch {
+      throw new Error("Could not reach Supabase Storage. Check its CORS settings and try again.");
+    }
+    if (!storageResponse.ok) {
+      throw new Error(`Supabase Storage rejected the upload (${storageResponse.status}).`);
+    }
+
+    const completeResponse = await fetch("/api/upload/complete/", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-CSRFToken": csrfToken },
+      body: JSON.stringify({ upload_token: signedUpload.upload_token }),
+    });
+    const result = await completeResponse.json();
+    if (!completeResponse.ok) throw new Error(result.error || "Could not finish the upload.");
+    return result;
+  }
+
   async function uploadFiles(files) {
     if (!files.length) return;
-    const data = new FormData();
-    [...files].forEach((file) => data.append("files", file));
     chooseFiles.disabled = true;
     chooseFiles.textContent = "Adding sources…";
+    const uploadedDocuments = [];
     try {
-      const response = await fetch("/api/upload/", {
-        method: "POST",
-        headers: { "X-CSRFToken": csrfToken },
-        body: data,
-      });
-      const result = await response.json();
-      if (!response.ok) throw new Error(result.error || "Upload failed.");
-      await refreshDocuments(new Set(result.documents.map((document) => String(document.id))));
-      showToast(`${result.documents.length} ${result.documents.length === 1 ? "source added" : "sources added"}.`);
+      if (fileInput.dataset.directUpload === "true") {
+        for (const file of files) uploadedDocuments.push(await uploadDirectFile(file));
+      } else {
+        const data = new FormData();
+        [...files].forEach((file) => data.append("files", file));
+        const response = await fetch("/api/upload/", {
+          method: "POST",
+          headers: { "X-CSRFToken": csrfToken },
+          body: data,
+        });
+        const result = await response.json();
+        if (!response.ok) throw new Error(result.error || "Upload failed.");
+        uploadedDocuments.push(...result.documents);
+      }
+      await refreshDocuments(new Set(uploadedDocuments.map((document) => String(document.id))));
+      showToast(`${uploadedDocuments.length} ${uploadedDocuments.length === 1 ? "source added" : "sources added"}.`);
     } catch (error) {
-      showToast(error.message, true);
+      let message = error.message;
+      if (uploadedDocuments.length) {
+        message = `${uploadedDocuments.length} file(s) uploaded before an error. ${message}`;
+        try {
+          await refreshDocuments(new Set(uploadedDocuments.map((document) => String(document.id))));
+        } catch (refreshError) {
+          message += ` Sources could not be refreshed: ${refreshError.message}`;
+        }
+      }
+      showToast(message, true);
     } finally {
       fileInput.value = "";
       chooseFiles.disabled = false;

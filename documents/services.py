@@ -1,6 +1,5 @@
 """Document parsing, retrieval, and answer generation."""
 
-import asyncio
 import ipaddress
 import io
 import os
@@ -8,8 +7,9 @@ import re
 import socket
 import zipfile
 from xml.etree import ElementTree
-from urllib.parse import urlsplit
+from urllib.parse import urljoin, urlsplit
 
+from bs4 import BeautifulSoup
 import httpx
 from django.core.exceptions import ValidationError
 from langchain_ollama import ChatOllama
@@ -26,6 +26,8 @@ CHUNK_SIZE = 1200
 CHUNK_OVERLAP = 180
 MAX_CRAWL_URL_LENGTH = 2048
 MAX_CRAWLED_TEXT_LENGTH = 1_000_000
+MAX_CRAWL_RESPONSE_SIZE = 5 * 1024 * 1024
+MAX_CRAWL_REDIRECTS = 5
 NEXUS_CREATOR_ANSWER = "The NEXUS AI was built by ADARSH & GOUTHAM."
 NEXUS_OVERVIEW_ANSWER = (
     "## What is Nexus AI?\n"
@@ -194,43 +196,71 @@ def validate_public_url(url):
     return url
 
 
-async def _crawl_with_crawl4ai(url):
-    try:
-        from crawl4ai import AsyncWebCrawler, BrowserConfig, CacheMode, CrawlerRunConfig
-        from playwright.async_api import Error as PlaywrightError
-    except ImportError as exc:
-        raise RuntimeError(
-            "Crawl4AI is not installed. Install the project requirements and run "
-            "'crawl4ai-setup' to install its browser."
-        ) from exc
-
-    browser_config = BrowserConfig(headless=True, verbose=False)
-    run_config = CrawlerRunConfig(cache_mode=CacheMode.BYPASS, page_timeout=45_000)
-    try:
-        async with AsyncWebCrawler(config=browser_config) as crawler:
-            return await crawler.arun(url=url, config=run_config)
-    except PlaywrightError as exc:
-        raise RuntimeError(
-            "Crawl4AI could not start its browser. Run 'crawl4ai-setup' and try again."
-        ) from exc
-
-
 def crawl_url(url):
-    """Crawl one public web page and return its final URL and extracted text."""
-    validated_url = validate_public_url(url)
-    result = asyncio.run(_crawl_with_crawl4ai(validated_url))
-    if not result.success:
-        raise WebCrawlError(result.error_message or "Crawl4AI could not read this page.")
+    """Fetch a public HTML page and return readable text without a browser."""
+    current_url = validate_public_url(url)
+    try:
+        with httpx.Client(
+            follow_redirects=False,
+            headers={"User-Agent": "NEXUS-document-crawler/1.0"},
+            timeout=httpx.Timeout(20.0, connect=5.0),
+        ) as client:
+            for redirect_count in range(MAX_CRAWL_REDIRECTS + 1):
+                with client.stream("GET", current_url) as response:
+                    if response.is_redirect:
+                        location = response.headers.get("location")
+                        if not location:
+                            raise WebCrawlError("The website returned an invalid redirect.")
+                        if redirect_count == MAX_CRAWL_REDIRECTS:
+                            raise WebCrawlError("The website redirected too many times.")
+                        current_url = validate_public_url(urljoin(current_url, location))
+                        continue
 
-    final_url = validate_public_url(result.url or validated_url)
-    markdown = result.markdown
-    text = getattr(markdown, "raw_markdown", markdown)
-    text = str(text or "").strip()
+                    try:
+                        response.raise_for_status()
+                    except httpx.HTTPStatusError as exc:
+                        raise WebCrawlError(
+                            f"The website returned HTTP {response.status_code}."
+                        ) from exc
+
+                    content_type = response.headers.get("content-type", "").lower()
+                    if not any(
+                        media_type in content_type
+                        for media_type in ("text/html", "application/xhtml+xml", "text/plain")
+                    ):
+                        raise WebCrawlError("The URL did not return an HTML or plain-text page.")
+
+                    content = bytearray()
+                    for chunk in response.iter_bytes():
+                        content.extend(chunk)
+                        if len(content) > MAX_CRAWL_RESPONSE_SIZE:
+                            raise WebCrawlError("The website response is too large to crawl.")
+                    page_content = bytes(content).decode(
+                        response.encoding or "utf-8",
+                        errors="replace",
+                    )
+                    if "text/plain" in content_type:
+                        text = page_content.strip()
+                    else:
+                        soup = BeautifulSoup(page_content, "html.parser")
+                        for element in soup.select("script, style, noscript, template, svg"):
+                            element.decompose()
+                        content_element = soup.find("main") or soup.body or soup
+                        text = content_element.get_text(separator="\n", strip=True)
+                    break
+            else:
+                raise WebCrawlError("The website redirected too many times.")
+    except httpx.TimeoutException as exc:
+        raise WebCrawlError("The website took too long to respond.") from exc
+    except httpx.RequestError as exc:
+        raise WebCrawlError(f"The website could not be fetched: {exc}") from exc
+
+    text = text.strip()
     if not text:
         raise WebCrawlError("No readable page content was found at this URL.")
     if len(text) > MAX_CRAWLED_TEXT_LENGTH:
         raise WebCrawlError("The page contains too much text to add as a source.")
-    return {"url": final_url, "text": text}
+    return {"url": current_url, "text": text}
 
 
 def read_document(upload):
@@ -362,6 +392,13 @@ def answer_question(question, documents):
         for item in matches
     )
     model = os.environ.get("OLLAMA_MODEL", "llama3.2:1b")
+    ollama_base_url = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434").rstrip("/")
+    ollama_api_key = os.environ.get("OLLAMA_API_KEY")
+    client_kwargs = (
+        {"headers": {"Authorization": f"Bearer {ollama_api_key}"}}
+        if ollama_api_key
+        else {}
+    )
     prompt = (
         "You answer questions using only the supplied document excerpts. "
         "If the excerpts do not contain the answer, say that you do not know. "
@@ -373,6 +410,8 @@ def answer_question(question, documents):
     try:
         response = ChatOllama(
             model=model,
+            base_url=ollama_base_url,
+            client_kwargs=client_kwargs,
             temperature=0,
             sync_client_kwargs={"timeout": httpx.Timeout(120.0, connect=5.0)},
         ).invoke(prompt)
@@ -384,7 +423,7 @@ def answer_question(question, documents):
         ) from exc
     except httpx.ConnectError as exc:
         raise RuntimeError(
-            "Could not connect to Ollama at http://localhost:11434. "
+            f"Could not connect to Ollama at {ollama_base_url}. "
             "Make sure Ollama is running."
         ) from exc
     except ResponseError as exc:

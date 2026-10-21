@@ -1,10 +1,12 @@
-from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+import json
+from io import BytesIO
+from unittest.mock import patch
 
 import httpx
+from django.core import signing
 from django.core.exceptions import ValidationError
 from django.core.files.uploadedfile import SimpleUploadedFile
-from django.test import TestCase
+from django.test import TestCase, override_settings
 
 from .models import ChatMessage, UploadedDocument
 from .services import (
@@ -168,22 +170,41 @@ class DocumentServiceTests(TestCase):
         "documents.services.validate_public_url",
         side_effect=["https://example.com", "https://example.com/article"],
     )
-    @patch("documents.services._crawl_with_crawl4ai", new_callable=AsyncMock)
-    def test_crawl_extracts_markdown_and_uses_final_page_url(
-        self, mock_crawl, _validate_url
-    ):
-        mock_crawl.return_value = SimpleNamespace(
-            success=True,
-            url="https://example.com/article",
-            markdown=SimpleNamespace(raw_markdown="# Article\nSolar power."),
-        )
+    def test_crawl_extracts_static_html_and_validates_redirect_target(self, _validate_url):
+        def response_for(request):
+            if request.url.path == "/":
+                return httpx.Response(302, headers={"Location": "/article"})
+            return httpx.Response(
+                200,
+                headers={"Content-Type": "text/html; charset=utf-8"},
+                text=(
+                    "<html><script>ignore this</script><main>"
+                    "<h1>Article</h1><p>Solar power.</p></main></html>"
+                ),
+            )
 
-        result = crawl_url("https://example.com")
+        client = httpx.Client(transport=httpx.MockTransport(response_for))
+        with patch("documents.services.httpx.Client", return_value=client):
+            result = crawl_url("https://example.com")
 
         self.assertEqual(
             result,
-            {"url": "https://example.com/article", "text": "# Article\nSolar power."},
+            {"url": "https://example.com/article", "text": "Article\nSolar power."},
         )
+
+    @patch(
+        "documents.services.validate_public_url",
+        side_effect=["https://example.com", ValidationError("Only public URLs are allowed.")],
+    )
+    def test_crawl_rejects_redirects_to_private_urls(self, _validate_url):
+        client = httpx.Client(
+            transport=httpx.MockTransport(
+                lambda _request: httpx.Response(302, headers={"Location": "http://localhost/"})
+            )
+        )
+        with patch("documents.services.httpx.Client", return_value=client):
+            with self.assertRaises(ValidationError):
+                crawl_url("https://example.com")
 
     @patch("documents.services.ChatOllama")
     def test_missing_ollama_is_reported_as_setup_error(self, mock_chat):
@@ -212,6 +233,29 @@ class DocumentServiceTests(TestCase):
             answer_question("How do solar panels generate electricity?", [document])
 
         self.assertEqual(mock_chat.call_args.kwargs["model"], "llama3.2:1b")
+
+    @patch.dict(
+        "os.environ",
+        {
+            "OLLAMA_BASE_URL": "https://ollama.example",
+            "OLLAMA_API_KEY": "test-token",
+        },
+        clear=False,
+    )
+    @patch("documents.services.ChatOllama")
+    def test_answer_uses_configured_remote_ollama_endpoint(self, mock_chat):
+        document = UploadedDocument(
+            name="solar.txt",
+            extracted_text="Solar panels convert sunlight into electricity using photovoltaic cells.",
+        )
+
+        answer_question("How do solar panels generate electricity?", [document])
+
+        self.assertEqual(mock_chat.call_args.kwargs["base_url"], "https://ollama.example")
+        self.assertEqual(
+            mock_chat.call_args.kwargs["client_kwargs"]["headers"]["Authorization"],
+            "Bearer test-token",
+        )
 
 
 class DocumentApiTests(TestCase):
@@ -247,6 +291,105 @@ class DocumentApiTests(TestCase):
 
         self.assertEqual(response.status_code, 400)
         self.assertEqual(UploadedDocument.objects.count(), 0)
+
+    @override_settings(DIRECT_UPLOADS_ENABLED=True)
+    @patch("documents.views.default_storage")
+    def test_direct_upload_returns_signed_url_and_token(self, mock_storage):
+        mock_storage.bucket_name = "nexus-documents"
+        mock_storage.connection.meta.client.generate_presigned_url.return_value = (
+            "https://storage.example/upload"
+        )
+
+        response = self.client.post(
+            "/api/upload/presign/",
+            data=json.dumps({"name": "notes.txt", "size": 23}),
+            content_type="application/json",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["upload_url"], "https://storage.example/upload")
+        token_data = signing.loads(
+            response.json()["upload_token"],
+            salt="documents.direct-upload",
+        )
+        self.assertEqual(token_data["name"], "notes.txt")
+        self.assertEqual(token_data["size"], 23)
+        presign_call = mock_storage.connection.meta.client.generate_presigned_url.call_args
+        self.assertEqual(presign_call.args[0], "put_object")
+        self.assertEqual(presign_call.kwargs["Params"]["ContentLength"], 23)
+
+    @override_settings(DIRECT_UPLOADS_ENABLED=True)
+    def test_direct_upload_rejects_unsupported_file_before_signing(self):
+        response = self.client.post(
+            "/api/upload/presign/",
+            data=json.dumps({"name": "script.exe", "size": 23}),
+            content_type="application/json",
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("Unsupported file type", response.json()["error"])
+
+    @override_settings(DIRECT_UPLOADS_ENABLED=True)
+    @patch("documents.views.default_storage")
+    def test_complete_direct_upload_extracts_and_saves_document(self, mock_storage):
+        key = "documents/2026/10/random_notes.txt"
+        mock_storage.bucket_name = "nexus-documents"
+        mock_storage.connection.meta.client.head_object.return_value = {
+            "ContentLength": 27,
+            "ContentType": "text/plain",
+        }
+        mock_storage.open.return_value = BytesIO(b"These are searchable notes.")
+        token = signing.dumps(
+            {
+                "key": key,
+                "name": "notes.txt",
+                "size": 27,
+                "content_type": "text/plain",
+            },
+            salt="documents.direct-upload",
+        )
+
+        response = self.client.post(
+            "/api/upload/complete/",
+            data=json.dumps({"upload_token": token}),
+            content_type="application/json",
+        )
+
+        self.assertEqual(response.status_code, 201)
+        document = UploadedDocument.objects.get()
+        self.assertEqual(document.file.name, key)
+        self.assertEqual(document.extracted_text, "These are searchable notes.")
+
+    @override_settings(DIRECT_UPLOADS_ENABLED=True)
+    @patch("documents.views.default_storage")
+    def test_complete_direct_upload_deletes_file_when_signed_size_does_not_match(
+        self, mock_storage
+    ):
+        key = "documents/2026/10/random_notes.txt"
+        mock_storage.bucket_name = "nexus-documents"
+        mock_storage.connection.meta.client.head_object.return_value = {
+            "ContentLength": 28,
+            "ContentType": "text/plain",
+        }
+        token = signing.dumps(
+            {
+                "key": key,
+                "name": "notes.txt",
+                "size": 27,
+                "content_type": "text/plain",
+            },
+            salt="documents.direct-upload",
+        )
+
+        response = self.client.post(
+            "/api/upload/complete/",
+            data=json.dumps({"upload_token": token}),
+            content_type="application/json",
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(UploadedDocument.objects.count(), 0)
+        mock_storage.delete.assert_called_once_with(key)
 
     def test_delete_document_removes_source(self):
         document = UploadedDocument.objects.create(
@@ -325,20 +468,6 @@ class DocumentApiTests(TestCase):
 
         self.assertEqual(response.status_code, 422)
         self.assertEqual(response.json()["error"], "The page could not be read.")
-
-    def test_crawl_reports_browser_setup_error(self):
-        with patch(
-            "documents.views.crawl_url",
-            side_effect=RuntimeError("Run 'crawl4ai-setup' and try again."),
-        ):
-            response = self.client.post(
-                "/api/crawl/",
-                data={"url": "https://example.com"},
-                content_type="application/json",
-            )
-
-        self.assertEqual(response.status_code, 503)
-        self.assertEqual(response.json()["error"], "Run 'crawl4ai-setup' and try again.")
 
     @patch(
         "documents.views.answer_question",
