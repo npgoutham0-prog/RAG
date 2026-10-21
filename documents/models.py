@@ -3,7 +3,8 @@ from django.db import models
 
 class UploadedDocument(models.Model):
     name = models.CharField(max_length=255)
-    file = models.FileField(upload_to="documents/%Y/%m/")
+    file = models.FileField(upload_to="documents/%Y/%m/", blank=True)
+    source_url = models.URLField(max_length=2048, blank=True)
     extracted_text = models.TextField()
     uploaded_at = models.DateTimeField(auto_now_add=True)
 
@@ -23,4 +24,3 @@ class ChatMessage(models.Model):
 
     class Meta:
         ordering = ["created_at", "id"]
-

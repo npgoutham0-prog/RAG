@@ -1,6 +1,9 @@
 (() => {
   const fileInput = document.getElementById("file-input");
   const chooseFiles = document.getElementById("choose-files");
+  const crawlForm = document.getElementById("crawl-form");
+  const crawlUrlInput = document.getElementById("crawl-url");
+  const crawlButton = document.getElementById("crawl-button");
   const sourcesPanel = document.querySelector(".sources-panel");
   const documentList = document.getElementById("document-list");
   const sourceTotal = document.getElementById("source-total");
@@ -10,6 +13,7 @@
   const form = document.getElementById("chat-form");
   const questionInput = document.getElementById("question-input");
   const sendButton = document.getElementById("send-button");
+  const sendButtonAnchor = sendButton.closest(".send-button-anchor");
   const chatHistory = document.getElementById("chat-history");
   const welcome = document.getElementById("welcome");
   const toast = document.getElementById("toast");
@@ -26,6 +30,19 @@
 
   function selectedIds() {
     return [...document.querySelectorAll(".document-check:checked")].map((input) => input.value);
+  }
+
+  function isNexusKnowledgeQuestion(question) {
+    return /\bnexus\b/i.test(question)
+      && /\b(build|built|builder|builders|create|created|creator|creators|develop|developed|developer|developers|founder|founders|founded|made|feature|features|capability|capabilities|technology|technologies|tech stack|framework|language|vision|goal|goals|purpose|rag|retrieval|what is|what's|who is|tell me about|describe|about)\b/i.test(question);
+  }
+
+  function isGreeting(question) {
+    return /^(hi|hello)[!?.\s]*$/i.test(question.trim());
+  }
+
+  function isThankYou(question) {
+    return /^(thank you|thanks|thank you so much|thanks so much)[!?.\s]*$/i.test(question.trim());
   }
 
   function updateSelection() {
@@ -50,9 +67,11 @@
     }
 
     documents.forEach((documentRecord) => {
-      const label = document.createElement("label");
-      label.className = "document-item";
-      label.dataset.name = documentRecord.name.toLowerCase();
+      const item = document.createElement("div");
+      item.className = "document-item";
+      item.dataset.name = documentRecord.name.toLowerCase();
+      const choice = document.createElement("label");
+      choice.className = "document-choice";
       const checkbox = document.createElement("input");
       checkbox.type = "checkbox";
       checkbox.className = "document-check";
@@ -70,8 +89,15 @@
       indicator.className = "check-indicator";
       indicator.setAttribute("aria-hidden", "true");
       indicator.textContent = "✓";
-      label.append(checkbox, icon, name, indicator);
-      documentList.append(label);
+      choice.append(checkbox, icon, name, indicator);
+      const deleteButton = document.createElement("button");
+      deleteButton.className = "delete-document";
+      deleteButton.type = "button";
+      deleteButton.setAttribute("aria-label", `Delete ${documentRecord.name}`);
+      deleteButton.title = "Delete source";
+      deleteButton.textContent = "×";
+      item.append(choice, deleteButton);
+      documentList.append(item);
     });
     sourceTotal.textContent = String(documents.length);
     updateSelection();
@@ -93,24 +119,72 @@
   }
 
   chooseFiles.addEventListener("click", () => fileInput.click());
+  async function uploadDirectFile(file) {
+    const signedResponse = await fetch("/api/upload/presign/", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-CSRFToken": csrfToken },
+      body: JSON.stringify({ name: file.name, size: file.size }),
+    });
+    const signedUpload = await signedResponse.json();
+    if (!signedResponse.ok) throw new Error(signedUpload.error || "Could not prepare the upload.");
+
+    let storageResponse;
+    try {
+      storageResponse = await fetch(signedUpload.upload_url, {
+        method: "PUT",
+        headers: { "Content-Type": signedUpload.content_type },
+        body: file,
+      });
+    } catch {
+      throw new Error("Could not reach Supabase Storage. Check its CORS settings and try again.");
+    }
+    if (!storageResponse.ok) {
+      throw new Error(`Supabase Storage rejected the upload (${storageResponse.status}).`);
+    }
+
+    const completeResponse = await fetch("/api/upload/complete/", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-CSRFToken": csrfToken },
+      body: JSON.stringify({ upload_token: signedUpload.upload_token }),
+    });
+    const result = await completeResponse.json();
+    if (!completeResponse.ok) throw new Error(result.error || "Could not finish the upload.");
+    return result;
+  }
+
   async function uploadFiles(files) {
     if (!files.length) return;
-    const data = new FormData();
-    [...files].forEach((file) => data.append("files", file));
     chooseFiles.disabled = true;
     chooseFiles.textContent = "Adding sources…";
+    const uploadedDocuments = [];
     try {
-      const response = await fetch("/api/upload/", {
-        method: "POST",
-        headers: { "X-CSRFToken": csrfToken },
-        body: data,
-      });
-      const result = await response.json();
-      if (!response.ok) throw new Error(result.error || "Upload failed.");
-      await refreshDocuments(new Set(result.documents.map((document) => String(document.id))));
-      showToast(`${result.documents.length} ${result.documents.length === 1 ? "source added" : "sources added"}.`);
+      if (fileInput.dataset.directUpload === "true") {
+        for (const file of files) uploadedDocuments.push(await uploadDirectFile(file));
+      } else {
+        const data = new FormData();
+        [...files].forEach((file) => data.append("files", file));
+        const response = await fetch("/api/upload/", {
+          method: "POST",
+          headers: { "X-CSRFToken": csrfToken },
+          body: data,
+        });
+        const result = await response.json();
+        if (!response.ok) throw new Error(result.error || "Upload failed.");
+        uploadedDocuments.push(...result.documents);
+      }
+      await refreshDocuments(new Set(uploadedDocuments.map((document) => String(document.id))));
+      showToast(`${uploadedDocuments.length} ${uploadedDocuments.length === 1 ? "source added" : "sources added"}.`);
     } catch (error) {
-      showToast(error.message, true);
+      let message = error.message;
+      if (uploadedDocuments.length) {
+        message = `${uploadedDocuments.length} file(s) uploaded before an error. ${message}`;
+        try {
+          await refreshDocuments(new Set(uploadedDocuments.map((document) => String(document.id))));
+        } catch (refreshError) {
+          message += ` Sources could not be refreshed: ${refreshError.message}`;
+        }
+      }
+      showToast(message, true);
     } finally {
       fileInput.value = "";
       chooseFiles.disabled = false;
@@ -118,6 +192,30 @@
     }
   }
   fileInput.addEventListener("change", () => uploadFiles(fileInput.files));
+  crawlForm.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    crawlButton.disabled = true;
+    crawlButton.textContent = "Crawling…";
+    try {
+      const response = await fetch("/api/crawl/", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-CSRFToken": csrfToken },
+        body: JSON.stringify({ url: crawlUrlInput.value.trim() }),
+      });
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.error || "Could not crawl this website.");
+      const selected = new Set(selectedIds());
+      selected.add(String(result.id));
+      await refreshDocuments(selected);
+      crawlUrlInput.value = "";
+      showToast("Website added as a source.");
+    } catch (error) {
+      showToast(error.message, true);
+    } finally {
+      crawlButton.disabled = false;
+      crawlButton.textContent = "Crawl URL";
+    }
+  });
   sourcesPanel.addEventListener("dragover", (event) => {
     if (!event.dataTransfer.types.includes("Files")) return;
     event.preventDefault();
@@ -143,6 +241,54 @@
   });
   searchInput.addEventListener("input", applySearch);
 
+  documentList.addEventListener("click", async (event) => {
+    const button = event.target instanceof Element
+      ? event.target.closest(".delete-document")
+      : null;
+    if (!button) return;
+    event.preventDefault();
+    event.stopPropagation();
+    if (!window.confirm("Delete this source? This cannot be undone.")) return;
+
+    const item = button.closest(".document-item");
+    button.disabled = true;
+    try {
+      const response = await fetch(`/api/documents/${item.querySelector(".document-check").value}/delete/`, {
+        method: "POST",
+        headers: { "X-CSRFToken": csrfToken },
+      });
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.error || "Could not delete this source.");
+
+      item.remove();
+      const remaining = documentList.querySelectorAll(".document-item").length;
+      sourceTotal.textContent = String(remaining);
+      if (!remaining) {
+        const empty = document.createElement("div");
+        empty.className = "empty-sources";
+        empty.innerHTML = '<span class="empty-file-icon" aria-hidden="true">▤</span><strong>No sources yet</strong><span>Add a document to start asking questions.</span>';
+        documentList.append(empty);
+      }
+      updateSelection();
+      showToast("Source deleted.");
+    } catch (error) {
+      showToast(error.message, true);
+    } finally {
+      if (button.isConnected) button.disabled = false;
+    }
+  });
+
+  sendButton.addEventListener("click", () => {
+    sendButtonAnchor.classList.remove("is-launching");
+    void sendButtonAnchor.offsetWidth;
+    sendButtonAnchor.classList.add("is-launching");
+  });
+  sendButtonAnchor.addEventListener("animationend", (event) => {
+    if (event.animationName === "send-button-jump") {
+      sendButtonAnchor.classList.remove("is-launching");
+    }
+  });
+
   document.querySelectorAll("[data-question]").forEach((button) => {
     button.addEventListener("click", () => {
       questionInput.value = button.dataset.question;
@@ -156,12 +302,12 @@
     article.className = `message message-${role}${error ? " message-error" : ""}`;
     const avatar = document.createElement("div");
     avatar.className = "message-avatar";
-    avatar.textContent = role === "user" ? "G" : error ? "!" : "✦";
+    avatar.textContent = role === "user" ? "⌬" : error ? "!" : "✦";
     const body = document.createElement("div");
     body.className = "message-body";
     const author = document.createElement("div");
     author.className = "message-author";
-    author.textContent = role === "user" ? "You" : error ? "Something went wrong" : "DocuChat";
+    author.textContent = role === "user" ? "You" : error ? "Something went wrong" : "NEXUS";
     const text = document.createElement("div");
     text.className = "message-text";
     text.textContent = content;
@@ -184,12 +330,27 @@
     return article;
   }
 
+  async function typeAssistantMessage(message, content) {
+    const text = message.querySelector(".message-text");
+    const textContent = document.createTextNode("");
+    const characters = Array.from(content);
+    const chunkSize = 3;
+    text.classList.add("typing-cursor");
+    text.append(textContent);
+    for (let index = 0; index < characters.length; index += chunkSize) {
+      textContent.appendData(characters.slice(index, index + chunkSize).join(""));
+      chatHistory.scrollTop = chatHistory.scrollHeight;
+      await new Promise((resolve) => window.setTimeout(resolve, 14));
+    }
+    text.classList.remove("typing-cursor");
+  }
+
   form.addEventListener("submit", async (event) => {
     event.preventDefault();
     const question = questionInput.value.trim();
     const documentIds = selectedIds();
     if (!question) return;
-    if (!documentIds.length) {
+    if (!documentIds.length && !isGreeting(question) && !isThankYou(question) && !isNexusKnowledgeQuestion(question)) {
       showToast("Select at least one source before asking a question.", true);
       return;
     }
@@ -216,7 +377,8 @@
         throw new Error(result.error || "The question could not be answered.");
       }
       pending.remove();
-      appendMessage("assistant", result.answer, result.sources);
+      const answer = appendMessage("assistant", "", result.sources);
+      await typeAssistantMessage(answer, result.answer);
     } catch (error) {
       pending.remove();
       appendMessage("assistant", error.message, [], true);
